@@ -3,9 +3,12 @@
 Android app (Kotlin + Jetpack Compose) that takes a TikTok link, calls the API, and shows every download option the API returns (video without watermark, MP3 audio, images if any). Downloads are saved to `Downloads/TikDown/` on the device via the system DownloadManager.
 
 ## Features
-- Paste a link or share it straight from the TikTok app ("Share" > TikDown)
-- Thumbnail, title and all media options from the API
-- Notification-based downloads, no storage permission needed on Android 10+
+- Splash, Home, History, My Videos and Settings screens
+- Paste a link, scan a QR code, or share a link from the TikTok app
+- Every option the API returns (video without watermark, MP3, images)
+- Download progress dialog with cancel and time remaining
+- My Videos: filters, search, built-in player, open with, share, copy link, open folder, delete
+- Settings: default format, auto download, save to gallery, dark mode, notifications, clear cache
 
 ## Change the API
 Edit `API_URL` in `app/build.gradle.kts`.

@@ -7,41 +7,32 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.core.content.ContextCompat
-import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
 
     private val vm: MainViewModel by viewModels()
-    private var sharedText by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handleIntent(intent)
+        if (savedInstanceState == null) handleIntent(intent)
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFFFE2C55))) {
-                Surface(Modifier.fillMaxSize()) {
-                    TikDownScreen(vm, sharedText) { sharedText = null }
+            TikTheme(vm.settings.darkMode) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    Root(vm)
                 }
             }
         }
@@ -54,153 +45,104 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
-            sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            intent.getStringExtra(Intent.EXTRA_TEXT)?.let { vm.onShared(it) }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+private data class NavTab(val label: String, val icon: ImageVector)
+
+private val tabs = listOf(
+    NavTab("Home", Icons.Default.Home),
+    NavTab("History", Icons.Default.History),
+    NavTab("My Videos", Icons.Default.PlayCircle),
+    NavTab("Settings", Icons.Default.Settings)
+)
+
 @Composable
-fun TikDownScreen(vm: MainViewModel, sharedText: String?, onSharedConsumed: () -> Unit) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
-    var input by remember { mutableStateOf("") }
-    var pending by remember { mutableStateOf<MediaOption?>(null) }
+fun Root(vm: MainViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var splash by rememberSaveable { mutableStateOf(true) }
+    var pendingOption by remember { mutableStateOf<MediaOption?>(null) }
+    val snackbar = remember { SnackbarHostState() }
 
-    fun startDownload(option: MediaOption, title: String) {
-        try {
-            Downloader.enqueue(context, option, title)
-            Toast.makeText(context, "Download started - check notifications", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-        }
+    LaunchedEffect(Unit) { delay(1400); splash = false }
+
+    // Android 13+: ask for notification permission once
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(splash) {
+        if (!splash && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        val state = vm.state
-        val opt = pending
-        if (granted && opt != null && state is UiState.Success) startDownload(opt, state.info.title)
+    // Android 9 and older need a storage permission
+    val storageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val opt = pendingOption
+        pendingOption = null
+        if (granted && opt != null) vm.startDownload(opt)
         else if (!granted) Toast.makeText(context, "Storage permission is required", Toast.LENGTH_SHORT).show()
-        pending = null
     }
 
-    fun requestDownload(option: MediaOption, title: String) {
-        val needsPermission = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
-            PackageManager.PERMISSION_GRANTED
-        if (needsPermission) {
-            pending = option
-            permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        } else {
-            startDownload(option, title)
-        }
+    fun requestDownload(option: MediaOption) {
+        val needs = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        if (needs) {
+            pendingOption = option
+            storageLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else vm.startDownload(option)
     }
 
-    // Auto-load links shared from the TikTok app
-    LaunchedEffect(sharedText) {
-        if (sharedText != null) {
-            input = sharedText
-            vm.load(sharedText)
-            onSharedConsumed()
-        }
+    // auto download
+    LaunchedEffect(vm.autoOption) {
+        vm.autoOption?.let { vm.autoOption = null; requestDownload(it) }
     }
+
+    // toast-style messages
+    LaunchedEffect(vm.message) {
+        vm.message?.let { snackbar.showSnackbar(it); vm.message = null }
+    }
+
+    if (splash) {
+        SplashScreen()
+        return
+    }
+
+    val playing = vm.playing
+    if (playing != null) {
+        BackHandler { vm.playing = null }
+        PlayerScreen(playing) { vm.playing = null }
+        return
+    }
+
+    BackHandler(enabled = vm.tab != 0) { vm.tab = 0 }
 
     Scaffold(
-        topBar = { CenterAlignedTopAppBar(title = { Text("TikDown") }) }
-    ) { padding ->
-        Column(
-            Modifier
-                .padding(padding)
-                .padding(16.dp)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("TikTok link") },
-                singleLine = true,
-                trailingIcon = {
-                    IconButton(onClick = {
-                        clipboard.getText()?.text?.let { input = it }
-                    }) { Icon(Icons.Default.ContentPaste, contentDescription = "Paste") }
-                }
-            )
-
-            Button(
-                onClick = { vm.load(input) },
-                enabled = input.isNotBlank() && vm.state !is UiState.Loading,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.Search, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Get download options")
-            }
-
-            when (val s = vm.state) {
-                UiState.Idle -> {}
-                UiState.Loading -> Box(Modifier.fillMaxWidth(), Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                is UiState.Failure -> Text(
-                    s.message,
-                    color = MaterialTheme.colorScheme.error
-                )
-                is UiState.Success -> ResultCard(s.info) { option -> requestDownload(option, s.info.title) }
-            }
-        }
-    }
-}
-
-@Composable
-fun ResultCard(info: VideoInfo, onDownload: (MediaOption) -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (info.thumbnail != null) {
-                AsyncImage(
-                    model = info.thumbnail,
-                    contentDescription = "Thumbnail",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(220.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                )
-            }
-            Text(
-                info.title,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (info.author != null) {
-                Text(info.author, style = MaterialTheme.typography.bodySmall)
-            }
-            HorizontalDivider()
-            Text("Download options", style = MaterialTheme.typography.labelLarge)
-            info.media.forEach { option ->
-                FilledTonalButton(
-                    onClick = { onDownload(option) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        when (option.type) {
-                            "audio" -> Icons.Default.MusicNote
-                            "image" -> Icons.Default.Image
-                            else -> Icons.Default.VideoFile
-                        },
-                        contentDescription = null
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
+        bottomBar = {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                tabs.forEachIndexed { i, t ->
+                    NavigationBarItem(
+                        selected = vm.tab == i,
+                        onClick = { vm.tab = i; if (i == 3) vm.refreshCache() },
+                        icon = { Icon(t.icon, t.label) },
+                        label = { Text(t.label) }
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text(option.label)
-                    Spacer(Modifier.weight(1f))
-                    Icon(Icons.Default.Download, contentDescription = "Download")
                 }
             }
         }
+    ) { padding ->
+        Box(Modifier.padding(padding)) {
+            when (vm.tab) {
+                0 -> HomeScreen(vm) { requestDownload(it) }
+                1 -> HistoryScreen(vm)
+                2 -> MyVideosScreen(vm)
+                else -> SettingsScreen(vm)
+            }
+        }
     }
+
+    vm.progress?.let { p -> ProgressDialog(p) { vm.cancelDownload() } }
+    vm.menuItem?.let { ItemMenu(vm, it) }
 }
